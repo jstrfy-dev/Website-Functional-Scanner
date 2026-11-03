@@ -1,0 +1,17 @@
+{
+  "name": "accessibility-scanner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local website accessibility scanner powered by Playwright and axe-core",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check scanner.js && node --check public/app.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "axe-core": "^4.10.3",
+    "express": "^4.21.2",
+    "playwright": "^1.51.0"
+  }
+}

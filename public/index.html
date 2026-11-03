@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Accessibility Scanner</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top"><div class="brand"><span class="mark">A</span><div><b>AccessCheck</b><small>WEBSITE ACCESSIBILITY SCANNER</small></div></div><span class="local">LOCAL SCANNER</span></header>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">MAKE THE WEB WORK FOR EVERYONE</div>
+      <h1>Find accessibility issues<br><em>before your users do.</em></h1>
+      <p>Crawl a public website to check accessibility and test safe interactions. Only scan sites you own or have permission to test.</p>
+      <form id="scanForm" class="scan-form">
+        <span class="globe" aria-hidden="true">◎</span><input id="url" type="text" aria-label="Website URL or domain" placeholder="https://example.com or example.com" required>
+        <button id="scanBtn" type="submit">Full site test <span>→</span></button>
+      </form>
+      <div class="options">
+        <label>Page limit <select id="pageLimit"><option>5</option><option selected>10</option><option>20</option><option>25</option></select></label>
+        <label>Crawl depth <select id="depth"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select></label>
+        <label class="toggle"><input id="testOrderFlow" type="checkbox"> Observe commerce pages</label>
+      </div>
+      <div class="hint">Runs locally · Respects robots.txt · Interaction tests never submit forms or place orders</div>
+      <div id="progress" class="progress" role="status" aria-live="polite" hidden><span aria-hidden="true"></span><b>Opening site and scanning pages…</b><i id="elapsed">0s elapsed</i></div>
+      <div id="error" class="error" role="alert"></div>
+    </section>
+    <section id="results" hidden>
+      <div class="results-head"><div><div class="eyebrow">SCAN REPORT</div><h2 id="siteTitle">Website results</h2><p id="siteUrl" class="muted"></p></div><button id="rescan" class="secondary">Scan another</button></div>
+      <div class="stats">
+        <article class="stat"><small>ACCESSIBILITY SCORE</small><strong id="score">—</strong><span>Automated checks only</span></article>
+        <article class="stat"><small>PAGES SCANNED</small><strong id="pageCount">0</strong><span id="pageStatus">Same-host pages</span></article>
+        <article class="stat"><small>INTERACTIONS WORKED</small><strong id="passed">0</strong><span id="interactionSummary">Not verified</span></article>
+        <article class="stat"><small>ISSUES / NO RESPONSE</small><strong id="total">0</strong><span id="high">0 failed · 0 skipped</span></article>
+      </div>
+      <div class="exportbar"><button id="exportJson" class="secondary">Export JSON</button><button id="exportHtml" class="secondary">Export HTML</button><button id="exportPdf" class="secondary">Print / Save PDF</button></div>
+      <div id="warningBox" class="note"><b>Authorized testing only</b><p>Only scan websites you own or have permission to test. Interactions are conservative; forms, external links, and potentially state-changing controls are skipped.</p></div>
+      <section class="report-section"><div class="filterbar"><h3>Page results</h3></div><div id="pageList" class="issues"></div></section>
+      <section class="report-section"><div class="filterbar"><h3>Interactive element report</h3><select id="interactionFilter"><option value="all">All results</option><option value="worked">Worked</option><option value="failed">Failed</option><option value="no-response">No response</option><option value="skipped">Skipped</option></select></div><div class="table-wrap"><table><thead><tr><th>Element / selector</th><th>Page</th><th>Action</th><th>Expected / actual</th><th>Result</th><th>Failure screenshot</th></tr></thead><tbody id="interactionRows"></tbody></table><div id="interactionEmpty" class="empty" hidden>No interactions in this category.</div></div></section>
+      <section class="report-section"><div class="filterbar"><h3>Accessibility issues</h3><select id="filter"><option value="all">All severities</option><option value="critical">Critical</option><option value="serious">Serious</option><option value="moderate">Moderate</option><option value="minor">Minor</option></select></div><div id="issueList" class="issues"></div></section>
+      <section class="report-section"><div class="filterbar"><h3>Browser errors and failed requests</h3></div><div id="networkList" class="issues"></div></section>
+      <div id="orderBox" class="note" hidden></div>
+      <div id="incompleteBox" class="note" hidden><b>Some checks need manual review</b><p id="incompleteText"></p></div>
+      <p class="disclaimer">The scanner reports only verified observations. Automated scans cannot establish overall WCAG conformance, reliable focus order, or expected business behavior. No order placement or payment is ever attempted.</p>
+    </section>
+    <section class="features">
+      <div><b>01 / Crawl</b><p>Same-host pages, robots.txt, page limits, and depth.</p></div><div><b>02 / WCAG</b><p>axe-core WCAG 2.2, A/AA, and best-practice rules.</p></div><div><b>03 / Interactions</b><p>Safely test observable responses; skip risky actions.</p></div><div><b>04 / Reports</b><p>Download JSON/HTML or print a PDF report.</p></div>
+    </section>
+  </main>
+  <footer>ACCESSCHECK · BUILT FOR A MORE INCLUSIVE WEB</footer>
+  <script src="/app.js"></script>
+</body></html>
