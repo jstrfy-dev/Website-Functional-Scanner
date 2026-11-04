@@ -1,6 +1,9 @@
 const dns = require("dns").promises;
 const net = require("net");
 const http = require("http");
+const fs = require("fs").promises;
+const path = require("path");
+const crypto = require("crypto");
 const { chromium } = require("playwright");
 const axe = require("axe-core");
 
@@ -10,6 +13,7 @@ const MAX_DISCOVERED_INTERACTIONS_PER_PAGE = 300;
 const MAX_SCREENSHOTS = 20;
 const PAGE_TIMEOUT_MS = 20000;
 const MAX_SCAN_MS = 8 * 60 * 1000;
+const REPORTS_DIRECTORY = path.join(__dirname, "reports");
 
 class ScanInputError extends Error {
   constructor(message) {
@@ -25,6 +29,8 @@ function redactUrls(value) {
 function safeReportUrl(value) {
   try {
     const url = new URL(value);
+    url.username = "";
+    url.password = "";
     url.search = "";
     url.hash = "";
     return url.toString();
@@ -259,6 +265,143 @@ function parseRobots(text) {
   return { rules, delayMs: Math.max(1000, crawlDelay * 1000) };
 }
 
+function resultForStatus(status) {
+  if (status === "worked") return "PASS";
+  if (status === "failed") return "FAIL";
+  return "NEEDS REVIEW";
+}
+
+function canonicalUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function buildLinkTests(links, pages) {
+  const pageByUrl = new Map();
+  for (const page of pages) {
+    for (const value of [page.url, page.requestedUrl]) {
+      const pageUrl = canonicalUrl(value);
+      if (pageUrl) pageByUrl.set(pageUrl, page);
+    }
+  }
+  const testByUrl = new Map();
+  for (const link of links) {
+    const url = canonicalUrl(link.url);
+    if (url && link.sameHost && !testByUrl.has(url)) testByUrl.set(url, pageByUrl.get(url));
+  }
+
+  return links.map(link => {
+    let result = "NEEDS REVIEW";
+    let actual = "Destination was not crawled; no request was made just to test this link.";
+    let error = "";
+    let destination;
+    if (link.kind === "limit") {
+      actual = `${link.count} additional link(s) were discovered but not individually checked because the per-page link limit was reached.`;
+    } else if (!link.hasDestination) {
+      result = "FAIL";
+      actual = "The link has an empty or missing href destination.";
+      error = "Missing link destination.";
+    } else if (link.kind === "unsupported") {
+      result = "FAIL";
+      actual = "The href does not use a supported HTTP(S) destination.";
+      error = "Unsupported link destination.";
+    } else if (link.kind === "fragment") {
+      actual = "In-page navigation was not activated; verify the fragment target manually.";
+    } else if (!link.sameHost) {
+      actual = `External destination was not requested or activated${link.url ? ` (${safeReportUrl(link.url)})` : ""}.`;
+    } else {
+      destination = testByUrl.get(canonicalUrl(link.url));
+      if (destination && Number.isInteger(destination.status)) {
+        if (destination.status >= 400) {
+          result = "FAIL";
+          actual = `The destination ${safeReportUrl(link.url)} returned HTTP ${destination.status}.`;
+          error = `HTTP ${destination.status}`;
+        } else if (destination.status >= 200 && destination.status < 400) {
+          result = "PASS";
+          actual = `The destination ${safeReportUrl(link.url)} was crawled and returned HTTP ${destination.status}.`;
+        }
+      } else if (destination?.status === "skipped") {
+        actual = destination.reason || actual;
+      } else if (destination?.status === "redirected-out-of-scope") {
+        actual = "The destination redirected outside the scanned host and was not followed.";
+      }
+    }
+
+    return {
+      category: "link",
+      page: link.page,
+      selector: link.selector,
+      name: link.name,
+      destination: link.url ? safeReportUrl(link.url) : "",
+      type: link.kind === "external" ? "external link" : "link",
+      action: "check destination without activating link",
+      expected: "A non-empty link destination responds successfully on the scanned host.",
+      actual,
+      result,
+      error,
+      screenshot: result === "FAIL" ? (destination?.failureScreenshot || link.failureScreenshot || null) : null,
+      screenshotPath: result === "FAIL" ? (destination?.failureScreenshotPath || link.failureScreenshotPath || null) : null
+    };
+  });
+}
+
+function buildFormTests(forms) {
+  return forms.map(form => ({
+    category: "form",
+    page: form.page,
+    selector: form.selector,
+    name: form.name,
+    type: "form",
+    action: "inspect form structure (not submitted)",
+    expected: "Required fields have native validation and a clear submit control.",
+    actual: `${form.fieldCount} field(s), ${form.requiredFields} required, ${form.submitButtons} submit control(s). ` +
+      `${form.nativeValidationEnabled ? "Native validation is enabled." : "Native validation is disabled."} ` +
+      "Submission and form-interaction JavaScript errors were not tested." +
+      (form.submitButtons ? "" : " No native submit control was found; custom submission behavior was not tested."),
+    result: "NEEDS REVIEW",
+    error: "",
+    screenshot: null,
+    screenshotPath: null
+  }));
+}
+
+function summarizeFunctionality(tests, javascriptErrors) {
+  return {
+    total: tests.length,
+    working: tests.filter(test => test.result === "PASS").length,
+    failed: tests.filter(test => test.result === "FAIL").length,
+    manualReview: tests.filter(test => test.result === "NEEDS REVIEW").length,
+    brokenLinks: tests.filter(test => test.category === "link" && test.result === "FAIL").length,
+    javascriptErrors
+  };
+}
+
+async function captureFailureScreenshot(page, scanId, screenshots, warnings) {
+  if (screenshots.length >= MAX_SCREENSHOTS) {
+    if (!warnings.includes("Screenshot limit reached; some failures have no screenshot.")) {
+      warnings.push("Screenshot limit reached; some failures have no screenshot.");
+    }
+    return { screenshot: null, screenshotPath: null };
+  }
+  try {
+    const image = await page.screenshot({ type: "jpeg", quality: 45, timeout: 2500 });
+    const filename = `${scanId}-${screenshots.length + 1}.jpg`;
+    await fs.mkdir(REPORTS_DIRECTORY, { recursive: true });
+    await fs.writeFile(path.join(REPORTS_DIRECTORY, filename), image);
+    const screenshot = `data:image/jpeg;base64,${image.toString("base64")}`;
+    screenshots.push(screenshot);
+    return { screenshot, screenshotPath: `/reports/${filename}` };
+  } catch (error) {
+    warnings.push(`Could not capture or save a failure screenshot: ${error.message}`);
+    return { screenshot: null, screenshotPath: null };
+  }
+}
+
 async function inspectPage(page, url) {
   const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT_MS });
   await page.waitForTimeout(500);
@@ -288,23 +431,67 @@ async function inspectPage(page, url) {
       }
       return parts.join(" > ");
     };
-    const links = Array.from(document.querySelectorAll("a[href]"))
-      .map(anchor => anchor.href).filter(href => /^https?:/i.test(href)).slice(0, 500);
+    const linkCount = document.querySelectorAll("a").length;
+    const links = Array.from(document.querySelectorAll("a")).slice(0, 500).map(anchor => {
+      const rawHref = anchor.getAttribute("href");
+      let destination = null;
+      try {
+        if (rawHref?.trim()) destination = new URL(rawHref, location.href);
+      } catch { /* Invalid destinations are reported below. */ }
+      const hasDestination = Boolean(rawHref?.trim());
+      const isHttp = destination && ["http:", "https:"].includes(destination.protocol);
+      const pathLooksStateful = destination &&
+        /(?:delete|remove|logout|log-out|purchase|payment|order|checkout|unsubscribe|cancel|signout)/i.test(
+          `${destination.pathname}${destination.search}`
+        );
+      const sameHost = Boolean(isHttp && destination.hostname === location.hostname);
+      const kind = !hasDestination ? "empty" :
+        !destination || (!isHttp && !["mailto:", "tel:"].includes(destination.protocol)) ? "unsupported" :
+          rawHref.startsWith("#") ? "fragment" : sameHost ? "internal" : "external";
+      return {
+        page: location.href,
+        selector: selectorFor(anchor),
+        name: (anchor.innerText || "").trim() || anchor.getAttribute("aria-label") || anchor.getAttribute("title") || "(unnamed link)",
+        hasDestination,
+        url: isHttp ? destination.toString() : "",
+        sameHost,
+        kind,
+        safeToCrawl: Boolean(sameHost && !pathLooksStateful && !anchor.hasAttribute("download") && anchor.target !== "_blank")
+      };
+    });
+    const forms = Array.from(document.forms).map(form => {
+      const fields = Array.from(form.elements).filter(element =>
+        element.matches("input:not([type=hidden]):not([type=submit]),select,textarea")
+      );
+      const requiredFields = fields.filter(element => element.required);
+      const submitButtons = Array.from(form.elements).filter(element =>
+        element.matches("button:not([type]),button[type=submit],input[type=submit],input[type=image]")
+      );
+      return {
+        page: location.href,
+        selector: selectorFor(form),
+        name: form.getAttribute("aria-label") || form.getAttribute("name") || "Form",
+        fieldCount: fields.length,
+        requiredFields: requiredFields.length,
+        submitButtons: submitButtons.length,
+        nativeValidationEnabled: !form.noValidate
+      };
+    });
     const elements = Array.from(document.querySelectorAll(
-      "form,button,a[href],input:not([type=hidden]),textarea,[role=button],[role=tab],[role=menuitem],[aria-haspopup],[onclick],[tabindex]:not([tabindex='-1']),select,summary"
-    )).map((element, index) => {
+      "button,input:not([type=hidden]),textarea,[role=button],[role=tab],[role=menuitem],[aria-haspopup],[aria-expanded],[aria-controls],[onclick],[tabindex]:not([tabindex='-1']),select,summary"
+    )).filter(element => !(element instanceof HTMLAnchorElement)).map((element, index) => {
       const type = element.getAttribute("type") || element.tagName.toLowerCase();
       const inputButton = element.matches("input[type=button],input[type=submit]");
       const labelText = element.labels ? Array.from(element.labels).map(label => label.innerText).join(" ").trim() : "";
       const name = (element.tagName === "FORM" ? "" : element.innerText) ||
         (inputButton ? element.value : "") || labelText || element.getAttribute("aria-label") ||
         element.getAttribute("title") || (element.tagName === "FORM" ? "Form" : "");
-      const href = element instanceof HTMLAnchorElement ? element.href : "";
-      const form = element.closest("form");
+      const form = element.form || element.closest("form");
       const style = getComputedStyle(element);
       const visible = element.getClientRects().length > 0 && style.visibility !== "hidden" && style.display !== "none";
       const defaultButtonType = element.tagName === "BUTTON" && !element.hasAttribute("type") ? "submit" : type;
-      const sideEffectPath = /(?:delete|remove|logout|log-out|purchase|payment|order|checkout|unsubscribe|cancel|signout)/i.test(href);
+      const label = `${name} ${element.getAttribute("title") || ""} ${element.getAttribute("aria-label") || ""} ${element.value || ""}`;
+      const sideEffectControl =       /(?:delete|remove|log\s*out|sign\s*out|purchase|payment|buy\b|checkout|unsubscribe|cancel|submit|send\b|post\b|publish|transfer|place\s+order|confirm|save|update|create|add|edit|register|subscribe|share|invite)/i.test(label);
       let safe = true;
       let skipReason = "";
       if (!visible) {
@@ -312,25 +499,42 @@ async function inspectPage(page, url) {
         skipReason = "Skipped because the element is not visible.";
       } else if (element.matches(":disabled,[aria-disabled='true']")) {
         safe = false;
-        skipReason = "Skipped because the element is disabled.";
-      } else if (element.matches("select,input,textarea") || element.tagName === "FORM" || element.tagName === "SUMMARY") {
+        skipReason = "Disabled in the page; whether this is unexpected requires manual review.";
+      } else if (element.matches("select,textarea,input:not([type=button])")) {
         safe = false;
-        skipReason = "Skipped to avoid changing site state or submitting data.";
+        skipReason = "Skipped because changing this field could alter site state or submit data.";
       } else if (form && element.tagName !== "A") {
         safe = false;
         skipReason = "Skipped because this control is inside a form.";
       } else if (element.tagName === "BUTTON" && defaultButtonType !== "button") {
         safe = false;
         skipReason = "Skipped because this button may submit a form.";
-      } else if (element.tagName === "A" &&
-          (new URL(href, location.href).hostname !== location.hostname ||
-           element.hasAttribute("download") || sideEffectPath || element.target === "_blank")) {
+      } else if (sideEffectControl) {
         safe = false;
-        skipReason = "Skipped external, new-window, download, or potentially state-changing link.";
+        skipReason = "Skipped because the control may perform a destructive or state-changing action.";
+      } else if (element.tagName === "SUMMARY") {
+        safe = true;
+      } else if (element.matches("[role=tab]") || element.matches("[role=menuitem]") || element.hasAttribute("aria-haspopup")) {
+        safe = true;
       }
+      const role = element.getAttribute("role");
+      const controlledId = element.getAttribute("aria-controls");
+      const controlledElement = controlledId ? document.getElementById(controlledId) : null;
+      const category = element.tagName === "SUMMARY" ? "accordion" :
+        role === "tab" ? "tab" :
+          controlledElement?.matches("[role=dialog],dialog") ? "modal" :
+            element.hasAttribute("aria-haspopup") ? "dropdown" :
+              role === "menuitem" ? "menu" :
+                element.hasAttribute("aria-expanded") ? "accordion" :
+          element.tagName === "BUTTON" || inputButton || role === "button" ? "button" : "control";
+      const expected = category === "tab" ? "The selected tab or its associated panel changes." :
+        category === "dropdown" || category === "menu" ? "The menu opens or its selection state changes." :
+                category === "accordion" ? "The disclosure expands or collapses." :
+                  category === "modal" ? "The controlled dialog opens or closes." :
+                    "The control responds without submitting data or changing protected state.";
       return {
-        selector: selectorFor(element), name: name || "(unnamed)", type,
-        action: element.tagName === "A" ? "click link" : "click control",
+        selector: selectorFor(element), name: name || "(unnamed)", type, category, expected,
+        action: category === "accordion" ? "toggle disclosure" : "click control",
         safe, skipReason, index
       };
     });
@@ -338,8 +542,11 @@ async function inspectPage(page, url) {
       title: document.title,
       url: location.href,
       links,
+      linkCount,
+      forms,
       elements: elements.slice(0, maxDiscoveredElements),
       elementCount: elements.length,
+      totalElementCount: elements.length + forms.length + linkCount,
       bodyText: (document.body?.innerText || "").slice(0, 6000),
       accessibility: {
         imagesMissingAlt: document.querySelectorAll("img:not([alt])").length,
@@ -401,7 +608,10 @@ async function scanWebsite(options) {
   const blockedRequests = [];
   const visited = new Map();
   const interactions = [];
+  const discoveredLinks = [];
+  const discoveredForms = [];
   const screenshots = [];
+  const scanId = crypto.randomUUID();
   const allAccessibility = [];
   const queue = [{ url: target, depth: 0 }];
   let proxy;
@@ -475,13 +685,20 @@ async function scanWebsite(options) {
 
       const page = await context.newPage();
       page.setDefaultNavigationTimeout(PAGE_TIMEOUT_MS);
+      let activeInteractionErrors = null;
       page.on("console", message => {
         if (message.type() === "error") consoleErrors.push({
           url: page.url(),
           message: message.text().replace(/https?:\/\/\S+/g, value => safeReportUrl(value)).slice(0, 500)
         });
+        if (message.type() === "error" && activeInteractionErrors) {
+          activeInteractionErrors.push(message.text().replace(/https?:\/\/\S+/g, value => safeReportUrl(value)).slice(0, 500));
+        }
       });
-      page.on("pageerror", error => consoleErrors.push({ url: page.url(), message: redactUrls(error.message).slice(0, 500) }));
+      page.on("pageerror", error => {
+        consoleErrors.push({ url: page.url(), message: redactUrls(error.message).slice(0, 500) });
+        if (activeInteractionErrors) activeInteractionErrors.push(redactUrls(error.message).slice(0, 500));
+      });
       page.on("requestfailed", request => failedRequests.push({
         url: page.url(), request: request.url(), error: request.failure()?.errorText || "Request failed"
       }));
@@ -525,21 +742,51 @@ async function scanWebsite(options) {
       }
       const pageResult = {
         url: finalUrl.toString(),
+        requestedUrl: pageUrl.toString(),
         title: inspected.snapshot.title,
         status: inspected.response?.status() ?? null,
         depth: item.depth,
         accessibility: inspected.accessibility,
         keyboard: inspected.keyboard,
         manual: inspected.snapshot.accessibility,
-        interactiveElementsDetected: inspected.snapshot.elementCount
+        interactiveElementsDetected: inspected.snapshot.totalElementCount
       };
+      const needsPageScreenshot = (pageResult.status >= 400) ||
+        inspected.snapshot.links.some(link => !link.hasDestination || link.kind === "unsupported");
+      if (needsPageScreenshot) {
+        Object.assign(pageResult, await captureFailureScreenshot(page, scanId, screenshots, warnings));
+        pageResult.failureScreenshot = pageResult.screenshot;
+        pageResult.failureScreenshotPath = pageResult.screenshotPath;
+        delete pageResult.screenshot;
+        delete pageResult.screenshotPath;
+      }
+      discoveredLinks.push(...inspected.snapshot.links.map(link => ({
+        ...link,
+        page: finalUrl.toString(),
+        failureScreenshotPath: !link.hasDestination || link.kind === "unsupported" ? pageResult.failureScreenshotPath : null,
+        failureScreenshot: !link.hasDestination || link.kind === "unsupported" ? pageResult.failureScreenshot : null
+      })));
+      if (inspected.snapshot.linkCount > inspected.snapshot.links.length) {
+        discoveredLinks.push({
+          page: finalUrl.toString(),
+          selector: "",
+          name: `${inspected.snapshot.linkCount - inspected.snapshot.links.length} additional links`,
+          hasDestination: true,
+          url: "",
+          sameHost: false,
+          kind: "limit",
+          count: inspected.snapshot.linkCount - inspected.snapshot.links.length
+        });
+      }
+      discoveredForms.push(...inspected.snapshot.forms.map(form => ({ ...form, page: finalUrl.toString() })));
       visited.set(pageUrl.toString(), pageResult);
       allAccessibility.push(...inspected.accessibility.violations.map(violation => ({ ...violation, page: finalUrl.toString() })));
 
-      for (const href of inspected.snapshot.links) {
+      for (const linkInfo of inspected.snapshot.links) {
         if (item.depth >= depthLimit) break;
         try {
-          const link = new URL(href);
+          if (!linkInfo.safeToCrawl) continue;
+          const link = new URL(linkInfo.url);
           link.hash = "";
           if (link.hostname === effectiveHost && !visited.has(link.toString()) &&
               !queue.some(entry => entry.url === link.toString())) {
@@ -555,7 +802,8 @@ async function scanWebsite(options) {
       for (const [elementIndex, element] of elements.entries()) {
         const record = {
           page: finalUrl.toString(), selector: element.selector, name: element.name,
-          type: element.type, action: element.action, expected: "Activation has an observable response.",
+          type: element.type, category: element.category, action: element.action,
+          expected: element.expected,
           actual: "", status: "skipped", error: "", screenshot: null
         };
         if (!element.safe) {
@@ -581,36 +829,46 @@ async function scanWebsite(options) {
             url: location.href,
             text: (document.body?.innerText || "").slice(0, 6000),
             expanded: document.querySelectorAll("[aria-expanded='true']").length,
+            selected: document.querySelectorAll("[aria-selected='true'],[aria-pressed='true']").length,
+            openDisclosures: document.querySelectorAll("details[open]").length,
             dialogs: document.querySelectorAll("[role=dialog],dialog[open]").length
           }));
+          const actionErrors = [];
+          activeInteractionErrors = actionErrors;
           await locator.click({ timeout: 1800, noWaitAfter: true });
-          await page.waitForTimeout(350);
+          await page.waitForTimeout(500);
+          activeInteractionErrors = null;
           const after = await page.evaluate(() => ({
             url: location.href,
             text: (document.body?.innerText || "").slice(0, 6000),
             expanded: document.querySelectorAll("[aria-expanded='true']").length,
+            selected: document.querySelectorAll("[aria-selected='true'],[aria-pressed='true']").length,
+            openDisclosures: document.querySelectorAll("details[open]").length,
             dialogs: document.querySelectorAll("[role=dialog],dialog[open]").length
           }));
           const changed = after.url !== before.url || after.text !== before.text ||
-            after.expanded !== before.expanded || after.dialogs !== before.dialogs;
-          record.status = changed ? "worked" : "no-response";
-          record.actual = changed ? "A URL, visible text, expanded control, or dialog changed." : "No observable page response after activation.";
+            after.expanded !== before.expanded || after.selected !== before.selected ||
+            after.openDisclosures !== before.openDisclosures || after.dialogs !== before.dialogs;
+          if (actionErrors.length) {
+            record.status = "failed";
+            record.error = [...new Set(actionErrors)].join(" · ").slice(0, 500);
+            record.actual = "A JavaScript error occurred during activation.";
+          } else {
+            record.status = changed ? "worked" : "no-response";
+            record.actual = changed ? "A URL, visible text, expanded control, or dialog changed." :
+              "No observable response; this does not prove the control is broken.";
+          }
           stoppedAfterNavigation = after.url !== before.url;
         } catch (error) {
+          activeInteractionErrors = null;
           record.status = "failed";
           record.error = error.message.slice(0, 500);
           record.actual = "The control could not be activated.";
         }
         if ((record.status === "failed" || record.status === "no-response") && screenshots.length < MAX_SCREENSHOTS) {
-          try {
-            record.screenshot = `data:image/jpeg;base64,${(await page.screenshot({ type: "jpeg", quality: 45, timeout: 2500 })).toString("base64")}`;
-            screenshots.push(record.screenshot);
-          } catch (error) {
-            warnings.push(`Could not capture a failure screenshot: ${error.message}`);
-          }
-        } else if ((record.status === "failed" || record.status === "no-response") &&
-            !warnings.includes("Screenshot limit reached; some failures have no screenshot.")) {
-          warnings.push("Screenshot limit reached; some failures have no screenshot.");
+          Object.assign(record, await captureFailureScreenshot(page, scanId, screenshots, warnings));
+        } else if (record.status === "failed" || record.status === "no-response") {
+          await captureFailureScreenshot(page, scanId, screenshots, warnings);
         }
         interactions.push(record);
       }
@@ -619,7 +877,8 @@ async function scanWebsite(options) {
         for (const element of elements.slice(timedOutIndex + 1)) {
           interactions.push({
             page: finalUrl.toString(), selector: element.selector, name: element.name,
-            type: element.type, action: element.action, expected: "Activation has an observable response.",
+            type: element.type, category: element.category, action: element.action,
+            expected: element.expected,
             actual: "Skipped because the scan time limit was reached.",
             status: "skipped", error: "", screenshot: null
           });
@@ -629,7 +888,8 @@ async function scanWebsite(options) {
         for (const element of inspected.snapshot.elements.slice(MAX_INTERACTIONS_PER_PAGE)) {
           interactions.push({
             page: finalUrl.toString(), selector: element.selector, name: element.name,
-            type: element.type, action: element.action, expected: "Activation has an observable response.",
+            type: element.type, category: element.category, action: element.action,
+            expected: element.expected,
             actual: "Skipped because the per-page interaction test limit was reached.",
             status: "skipped", error: "", screenshot: null
           });
@@ -664,6 +924,15 @@ async function scanWebsite(options) {
       elementsDetected: scannedPages.reduce((sum, page) => sum + page.interactiveElementsDetected, 0),
       brokenImages: scannedPages.reduce((sum, page) => sum + (page.manual?.brokenImages.length || 0), 0)
     };
+    const linkTests = buildLinkTests(discoveredLinks, pages);
+    const formTests = buildFormTests(discoveredForms);
+    const interactionTests = interactions.map(item => ({
+      ...item,
+      category: item.category || "control",
+      result: resultForStatus(item.status)
+    }));
+    const functionalityTests = [...interactionTests, ...linkTests, ...formTests];
+    const functionalitySummary = summarizeFunctionality(functionalityTests, consoleErrors.length);
     const totalChecks = counts.accessibilityPasses + counts.accessibilityIssues;
     const accessibilityScore = totalChecks ? Math.round(counts.accessibilityPasses * 100 / totalChecks) : null;
     const commerceCandidates = scannedPages.filter(page => /product|item|cart|checkout|basket/i.test(page.url));
@@ -672,13 +941,19 @@ async function scanWebsite(options) {
       scannedAt: new Date().toISOString(),
       title: scannedPages[0]?.title || new URL(target).hostname,
       summary: { ...counts, accessibilityScore },
-      pages: pages.map(page => ({
+      pages: pages.map(({ requestedUrl, failureScreenshot, failureScreenshotPath, ...page }) => ({
         ...page,
         url: safeReportUrl(page.url),
         brokenImages: page.manual?.brokenImages || [],
         error: page.error ? page.error.replace(/https?:\/\/\S+/g, value => safeReportUrl(value)) : page.error
       })),
       interactions: interactions.map(item => ({
+        ...item,
+        page: safeReportUrl(item.page),
+        error: redactUrls(item.error)
+      })),
+      functionalitySummary,
+      functionalityTests: functionalityTests.map(item => ({
         ...item,
         page: safeReportUrl(item.page),
         error: redactUrls(item.error)
@@ -713,8 +988,8 @@ async function scanWebsite(options) {
       } : null,
       limitations: [
         "Automated checks cannot prove keyboard quality, focus order, intended interaction behavior, or WCAG conformance.",
-        "Interactive form controls and potentially state-changing links are skipped; order submission is never attempted.",
-        "Only same-host pages discovered through links are crawled."
+        "Forms are inspected but never submitted; external links are never requested, and state-changing controls are not activated.",
+        "Link HTTP results use only same-host pages already visited by the bounded crawler; uncrawled destinations need manual review."
       ]
     };
   } finally {
@@ -734,5 +1009,9 @@ module.exports = {
   isPrivateIPv6,
   parseRobots,
   robotsAllows,
+  resultForStatus,
+  buildLinkTests,
+  buildFormTests,
+  summarizeFunctionality,
   scanWebsite
 };

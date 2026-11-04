@@ -52,7 +52,7 @@ document.getElementById("rescan").addEventListener("click", () => {
   window.scrollTo({ top: 0, behavior: "smooth" });
 });
 document.getElementById("filter").addEventListener("change", () => renderIssues(report));
-document.getElementById("interactionFilter").addEventListener("change", () => renderInteractions(report));
+document.getElementById("functionalityFilter").addEventListener("change", () => renderFunctionality(report));
 document.getElementById("exportJson").addEventListener("click", () => {
   if (report) download("accesscheck-report.json", JSON.stringify(report, null, 2), "application/json");
 });
@@ -74,9 +74,16 @@ function render(data) {
   document.getElementById("pageStatus").textContent = `${data.summary.accessibilityIssues} accessibility issues`;
   document.getElementById("incompleteBox").hidden = !data.warnings.length;
   document.getElementById("incompleteText").textContent = data.warnings.join(" · ");
+  const functionality = data.functionalitySummary || {};
+  document.getElementById("functionalityTotal").textContent = functionality.total || 0;
+  document.getElementById("functionalityWorking").textContent = functionality.working || 0;
+  document.getElementById("functionalityFailed").textContent = functionality.failed || 0;
+  document.getElementById("functionalityReview").textContent = functionality.manualReview || 0;
+  document.getElementById("brokenLinks").textContent = functionality.brokenLinks || 0;
+  document.getElementById("javascriptErrors").textContent = functionality.javascriptErrors || 0;
   renderPages(data);
   renderIssues(data);
-  renderInteractions(data);
+  renderFunctionality(data);
   renderNetwork(data);
   renderOrderFlow(data);
 }
@@ -125,22 +132,23 @@ function renderIssues(data) {
   }).join("");
 }
 
-function renderInteractions(data) {
-  const rows = document.getElementById("interactionRows");
-  const empty = document.getElementById("interactionEmpty");
+function renderFunctionality(data) {
+  const rows = document.getElementById("functionalityRows");
+  const empty = document.getElementById("functionalityEmpty");
   if (!data) return;
-  const filter = document.getElementById("interactionFilter").value;
-  const items = data.interactions.filter(item => filter === "all" || item.status === filter);
+  const filter = document.getElementById("functionalityFilter").value;
+  const items = (data.functionalityTests || [])
+    .filter(item => filter === "all" || item.result === filter);
   empty.hidden = items.length > 0;
   rows.innerHTML = items.map(item => `<tr>
-    <td><strong>${escapeHtml(item.name)}</strong><small class="table-meta">${escapeHtml(item.type)}</small>
+    <td><strong>${escapeHtml(item.name)}</strong><small class="table-meta">${escapeHtml(item.category || item.type)} · ${escapeHtml(item.type)}</small>
       <span class="selector">${escapeHtml(item.selector || "Not applicable")}</span></td>
-    <td class="url-cell">${escapeHtml(item.page)}</td>
+    <td class="url-cell">${escapeHtml(item.page)}${item.destination ? `<small class="table-meta">Destination: ${escapeHtml(item.destination)}</small>` : ""}</td>
     <td>${escapeHtml(item.action)}</td>
     <td><b>Expected:</b> ${escapeHtml(item.expected)}<br><b>Actual:</b> ${escapeHtml(item.actual)}
       ${item.error ? `<p class="error-detail">${escapeHtml(item.error)}</p>` : ""}</td>
-    <td><span class="pill ${interactionClass(item.status)}">${escapeHtml(item.status)}</span></td>
-    <td>${item.screenshot ? `<a href="${item.screenshot}" download="interaction-failure.jpg"><img class="failure-shot" src="${item.screenshot}" alt="Screenshot of failed interaction"></a>` : "—"}</td>
+    <td><span class="pill ${resultClass(item.result)}">${escapeHtml(item.result)}</span></td>
+    <td>${item.screenshot ? `<a href="${escapeAttr(item.screenshotPath || item.screenshot)}" download="accesscheck-failure.jpg"><img class="failure-shot" src="${escapeAttr(item.screenshot)}" alt="Screenshot for ${escapeAttr(item.result.toLowerCase())} functionality test"></a>` : "—"}</td>
     </tr>`).join("");
 }
 
@@ -171,8 +179,8 @@ function renderOrderFlow(data) {
     <p>${data.orderFlow.steps.map(step => `${escapeHtml(step.step)}: ${escapeHtml(step.status)}`).join(" · ")}</p>`;
 }
 
-function interactionClass(status) {
-  return status === "worked" ? "worked" : (status === "failed" || status === "no-response" ? "serious" : "");
+function resultClass(result) {
+  return result === "PASS" ? "pass" : result === "FAIL" ? "fail" : "needs-review";
 }
 function safeWebLink(value) {
   try {

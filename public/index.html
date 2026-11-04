@@ -35,7 +35,20 @@
       <div class="exportbar"><button id="exportJson" class="secondary">Export JSON</button><button id="exportHtml" class="secondary">Export HTML</button><button id="exportPdf" class="secondary">Print / Save PDF</button></div>
       <div id="warningBox" class="note"><b>Authorized testing only</b><p>Only scan websites you own or have permission to test. Interactions are conservative; forms, external links, and potentially state-changing controls are skipped.</p></div>
       <section class="report-section"><div class="filterbar"><h3>Page results</h3></div><div id="pageList" class="issues"></div></section>
-      <section class="report-section"><div class="filterbar"><h3>Interactive element report</h3><select id="interactionFilter"><option value="all">All results</option><option value="worked">Worked</option><option value="failed">Failed</option><option value="no-response">No response</option><option value="skipped">Skipped</option></select></div><div class="table-wrap"><table><thead><tr><th>Element / selector</th><th>Page</th><th>Action</th><th>Expected / actual</th><th>Result</th><th>Failure screenshot</th></tr></thead><tbody id="interactionRows"></tbody></table><div id="interactionEmpty" class="empty" hidden>No interactions in this category.</div></div></section>
+      <section class="report-section functionality-section">
+        <div class="filterbar"><div><div class="eyebrow">BUTTONS · LINKS · FORMS · CONTROLS</div><h3>Functionality Test Results</h3></div>
+          <select id="functionalityFilter" aria-label="Filter functionality results"><option value="all">All results</option><option value="PASS">Pass</option><option value="FAIL">Fail</option><option value="NEEDS REVIEW">Needs review</option></select>
+        </div>
+        <div class="functionality-stats">
+          <article class="functionality-stat"><small>TOTAL ELEMENTS</small><strong id="functionalityTotal">0</strong></article>
+          <article class="functionality-stat pass-stat"><small>WORKING</small><strong id="functionalityWorking">0</strong></article>
+          <article class="functionality-stat fail-stat"><small>FAILED</small><strong id="functionalityFailed">0</strong></article>
+          <article class="functionality-stat review-stat"><small>MANUAL REVIEW</small><strong id="functionalityReview">0</strong></article>
+          <article class="functionality-stat"><small>BROKEN LINKS</small><strong id="brokenLinks">0</strong></article>
+          <article class="functionality-stat"><small>JAVASCRIPT ERRORS</small><strong id="javascriptErrors">0</strong></article>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Element / selector</th><th>Page</th><th>Action</th><th>Expected / actual</th><th>Result</th><th>Failure screenshot</th></tr></thead><tbody id="functionalityRows"></tbody></table><div id="functionalityEmpty" class="empty" hidden>No functionality checks in this category.</div></div>
+      </section>
       <section class="report-section"><div class="filterbar"><h3>Accessibility issues</h3><select id="filter"><option value="all">All severities</option><option value="critical">Critical</option><option value="serious">Serious</option><option value="moderate">Moderate</option><option value="minor">Minor</option></select></div><div id="issueList" class="issues"></div></section>
       <section class="report-section"><div class="filterbar"><h3>Browser errors and failed requests</h3></div><div id="networkList" class="issues"></div></section>
       <div id="orderBox" class="note" hidden></div>

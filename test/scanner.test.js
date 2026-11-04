@@ -5,7 +5,11 @@ const {
   isPrivateIPv4,
   isPrivateIPv6,
   parseRobots,
-  robotsAllows
+  robotsAllows,
+  resultForStatus,
+  buildLinkTests,
+  buildFormTests,
+  summarizeFunctionality
 } = require("../scanner");
 
 test("normalizes domain names and complete URLs", () => {
@@ -53,4 +57,76 @@ test("applies a minimum robots crawl delay and ignores other user agents", () =>
 test("prefers an equally specific robots Allow rule", () => {
   const robots = parseRobots("User-agent: *\nDisallow: /public\nAllow: /public");
   assert.equal(robotsAllows("/public/page", robots.rules), true);
+});
+
+test("maps interaction observations to clear functionality outcomes", () => {
+  assert.equal(resultForStatus("worked"), "PASS");
+  assert.equal(resultForStatus("failed"), "FAIL");
+  assert.equal(resultForStatus("no-response"), "NEEDS REVIEW");
+  assert.equal(resultForStatus("skipped"), "NEEDS REVIEW");
+});
+
+test("checks links only against already crawled same-host pages", () => {
+  const links = [
+    { page: "https://site.test/", selector: "a:nth-of-type(1)", name: "Working", hasDestination: true, url: "https://site.test/ok", sameHost: true, kind: "internal" },
+    { page: "https://site.test/", selector: "a:nth-of-type(2)", name: "Broken", hasDestination: true, url: "https://site.test/missing", sameHost: true, kind: "internal" },
+    { page: "https://site.test/", selector: "a:nth-of-type(3)", name: "Empty", hasDestination: false, url: "", sameHost: false, kind: "empty" },
+    { page: "https://site.test/", selector: "a:nth-of-type(4)", name: "External", hasDestination: true, url: "https://other.test/", sameHost: false, kind: "external" }
+  ];
+  const pages = [
+    { url: "https://site.test/ok", status: 200 },
+    { url: "https://site.test/missing", status: 404, failureScreenshot: "data:image/jpeg;base64,shot" }
+  ];
+  const tests = buildLinkTests(links, pages);
+  assert.deepEqual(tests.map(test => test.result), ["PASS", "FAIL", "FAIL", "NEEDS REVIEW"]);
+  assert.equal(tests[1].error, "HTTP 404");
+  assert.equal(tests[1].screenshot, "data:image/jpeg;base64,shot");
+  assert.match(tests[3].actual, /not requested or activated/);
+});
+
+test("reports forms without submitting them", () => {
+  const [form] = buildFormTests([{
+    page: "https://site.test/contact",
+    selector: "form",
+    name: "Contact",
+    fieldCount: 3,
+    requiredFields: 2,
+    submitButtons: 0,
+    nativeValidationEnabled: true
+  }]);
+  assert.equal(form.result, "NEEDS REVIEW");
+  assert.match(form.action, /not submitted/);
+  assert.match(form.actual, /2 required/);
+  assert.match(form.actual, /No native submit control/);
+});
+
+test("recognizes redirects and reports the bounded link-discovery limit", () => {
+  const links = [
+    { page: "https://site.test/", selector: "a.old", name: "Redirected", hasDestination: true, url: "https://site.test/old", sameHost: true, kind: "internal" },
+    { page: "https://site.test/", selector: "", name: "3 additional links", hasDestination: true, url: "", sameHost: false, kind: "limit", count: 3 }
+  ];
+  const tests = buildLinkTests(links, [{
+    url: "https://site.test/new",
+    requestedUrl: "https://site.test/old",
+    status: 200
+  }]);
+  assert.equal(tests[0].result, "PASS");
+  assert.equal(tests[1].result, "NEEDS REVIEW");
+  assert.match(tests[1].actual, /3 additional link/);
+});
+
+test("summarizes functionality outcomes and link errors", () => {
+  const summary = summarizeFunctionality([
+    { category: "button", result: "PASS" },
+    { category: "link", result: "FAIL" },
+    { category: "form", result: "NEEDS REVIEW" }
+  ], 2);
+  assert.deepEqual(summary, {
+    total: 3,
+    working: 1,
+    failed: 1,
+    manualReview: 1,
+    brokenLinks: 1,
+    javascriptErrors: 2
+  });
 });
